@@ -2,13 +2,8 @@
 
 import { useState, useEffect } from "react";
 import type { ChampionshipDetail } from "@/lib/types";
-import {
-  TYPES_CDC,
-  DIVISIONS,
-  poulesForDivision,
-  FORMATS,
-  FORMAT_CONFIG,
-} from "@/lib/cdc";
+import { TYPES_CDC, DIVISIONS, poulesForDivision } from "@/lib/cdc";
+import { adminFetch } from "@/lib/adminFetch";
 
 export default function ConfigTab({
   detail,
@@ -23,7 +18,6 @@ export default function ConfigTab({
   const [typeCdc, setTypeCdc] = useState(c.typeCdc);
   const [division, setDivision] = useState(c.division);
   const [poule, setPoule] = useState(c.poule);
-  const [format, setFormat] = useState<string>(c.format ?? "Doublettes");
   const [ptsVictoire, setPtsVictoire] = useState(c.ptsVictoire ?? 3);
   const [ptsNul, setPtsNul] = useState(c.ptsNul ?? 2);
   const [ptsDefaite, setPtsDefaite] = useState(c.ptsDefaite ?? 1);
@@ -43,6 +37,11 @@ export default function ConfigTab({
   const [journeeRows, setJourneeRows] = useState(detail.journees);
   const [savingJournees, setSavingJournees] = useState(false);
 
+  // Réorganisation des journées (nouveaux numéros)
+  const [newOrders, setNewOrders] = useState<Record<number, string>>({});
+  const [reordering, setReordering] = useState(false);
+  const [reorderMsg, setReorderMsg] = useState<string | null>(null);
+
   useEffect(() => {
     const max = Math.max(8, detail.teams.length);
     const rows: { numero: number; nom: string }[] = [];
@@ -61,7 +60,7 @@ export default function ConfigTab({
     setSavingCfg(true);
     setMsg(null);
     try {
-      await fetch(`/api/championnats/${c.id}`, {
+      await adminFetch(`/api/championnats/${c.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -70,7 +69,6 @@ export default function ConfigTab({
           typeCdc,
           division,
           poule,
-          format,
           ptsVictoire,
           ptsNul,
           ptsDefaite,
@@ -88,7 +86,7 @@ export default function ConfigTab({
     setSavingTeams(true);
     setMsg(null);
     try {
-      await fetch(`/api/championnats/${c.id}/teams`, {
+      await adminFetch(`/api/championnats/${c.id}/teams`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -115,14 +113,14 @@ export default function ConfigTab({
     setTirageError(null);
     try {
       // On enregistre d'abord les équipes
-      await fetch(`/api/championnats/${c.id}/teams`, {
+      await adminFetch(`/api/championnats/${c.id}/teams`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           teams: teamRows.filter((t) => t.nom.trim().length > 0),
         }),
       });
-      const res = await fetch(`/api/championnats/${c.id}/tirage`, {
+      const res = await adminFetch(`/api/championnats/${c.id}/tirage`, {
         method: "POST",
       });
       const data = await res.json();
@@ -137,17 +135,45 @@ export default function ConfigTab({
     }
   }
 
+  async function reordonnerJournees() {
+    setReordering(true);
+    setReorderMsg(null);
+    try {
+      const orders = journeeRows.map((j) => ({
+        id: j.id,
+        numero: Number(newOrders[j.id] ?? j.numero),
+      }));
+      const res = await adminFetch(
+        `/api/championnats/${c.id}/journees/reordonner`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ orders }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setReorderMsg("❌ " + (data.error ?? "Erreur."));
+      } else {
+        setNewOrders({});
+        setReorderMsg("✅ Journées réorganisées !");
+        await reload();
+      }
+    } finally {
+      setReordering(false);
+    }
+  }
+
   async function saveJournees() {
     setSavingJournees(true);
     setMsg(null);
     try {
-      await fetch(`/api/championnats/${c.id}/journees`, {
+      await adminFetch(`/api/championnats/${c.id}/journees`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           journees: journeeRows.map((j) => ({
             id: j.id,
-            numero: j.numero,
             lieu: j.lieu,
             dateRencontre: j.dateRencontre,
             heure: j.heure,
@@ -239,86 +265,71 @@ export default function ConfigTab({
               ))}
             </select>
           </label>
-          <label className="grid gap-1 text-sm">
-            <span className="font-medium text-slate-700">
-              Format de jeu (36 pts)
-            </span>
-            <select
-              value={format}
-              onChange={(e) => setFormat(e.target.value)}
-              className="rounded-lg border border-slate-300 px-3 py-2"
-            >
-              {FORMATS.map((f) => (
-                <option key={f} value={f}>
-                  {f} — {FORMAT_CONFIG[f].parties} parties de{" "}
-                  {FORMAT_CONFIG[f].pointsParPartie} pts
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
+
+        {/* Barème de points */}
+        <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50/50 p-4">
+          <h4 className="font-semibold text-slate-800">
+            🎯 Barème de points du classement
+          </h4>
+          <p className="mt-1 text-xs text-slate-500">
+            Modifiez les points attribués par résultat : le classement (site et
+            PDF) se recalcule automatiquement, y compris pour les rencontres
+            déjà jouées.
+          </p>
+          <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium text-emerald-800">Victoire</span>
+              <input
+                type="number"
+                min={0}
+                value={ptsVictoire}
+                onChange={(e) => setPtsVictoire(Number(e.target.value))}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-center font-bold"
+              />
+            </label>
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium text-slate-700">Nul</span>
+              <input
+                type="number"
+                min={0}
+                value={ptsNul}
+                onChange={(e) => setPtsNul(Number(e.target.value))}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-center font-bold"
+              />
+            </label>
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium text-slate-700">Défaite</span>
+              <input
+                type="number"
+                min={0}
+                value={ptsDefaite}
+                onChange={(e) => setPtsDefaite(Number(e.target.value))}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-center font-bold"
+              />
+            </label>
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium text-red-700">Forfait</span>
+              <input
+                type="number"
+                min={0}
+                value={ptsForfait}
+                onChange={(e) => setPtsForfait(Number(e.target.value))}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-center font-bold"
+              />
+            </label>
+          </div>
+          <p className="mt-2 text-xs text-slate-400">
+            Barème officiel FFPJP : Victoire 3 · Nul 2 · Défaite 1 · Forfait 0
+          </p>
+        </div>
+
         <button
           onClick={saveConfig}
           disabled={savingCfg}
           className="mt-4 rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-60"
         >
           {savingCfg ? "Enregistrement…" : "Enregistrer la désignation"}
-        </button>
-      </section>
-
-      {/* Barème des points */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h3 className="mb-1 text-lg font-semibold text-slate-800">
-          📊 Barème des points
-        </h3>
-        <p className="mb-4 text-sm text-slate-500">
-          Modifiez les points attribués à chaque résultat. Défaut : victoire 3 ·
-          nul 2 · défaite 1 · forfait 0.
-        </p>
-        <div className="grid gap-4 sm:grid-cols-4">
-          <label className="grid gap-1 text-sm">
-            <span className="font-medium text-slate-700">Victoire</span>
-            <input
-              type="number"
-              value={ptsVictoire}
-              onChange={(e) => setPtsVictoire(Number(e.target.value))}
-              className="rounded-lg border border-slate-300 px-3 py-2"
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            <span className="font-medium text-slate-700">Nul</span>
-            <input
-              type="number"
-              value={ptsNul}
-              onChange={(e) => setPtsNul(Number(e.target.value))}
-              className="rounded-lg border border-slate-300 px-3 py-2"
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            <span className="font-medium text-slate-700">Défaite</span>
-            <input
-              type="number"
-              value={ptsDefaite}
-              onChange={(e) => setPtsDefaite(Number(e.target.value))}
-              className="rounded-lg border border-slate-300 px-3 py-2"
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            <span className="font-medium text-slate-700">Forfait</span>
-            <input
-              type="number"
-              value={ptsForfait}
-              onChange={(e) => setPtsForfait(Number(e.target.value))}
-              className="rounded-lg border border-slate-300 px-3 py-2"
-            />
-          </label>
-        </div>
-        <button
-          onClick={saveConfig}
-          disabled={savingCfg}
-          className="mt-4 rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-60"
-        >
-          {savingCfg ? "Enregistrement…" : "Enregistrer le barème"}
         </button>
       </section>
 
@@ -401,24 +412,31 @@ export default function ConfigTab({
             {journeeRows.map((j, i) => (
               <div
                 key={j.id}
-                className="grid items-center gap-2 sm:grid-cols-[auto_2fr_2fr_1fr]"
+                className="grid items-center gap-2 sm:grid-cols-[auto_auto_2fr_2fr_1fr]"
               >
-                <input
-                  type="number"
-                  min={1}
-                  value={j.numero}
-                  onChange={(e) =>
-                    setJourneeRows((prev) =>
-                      prev.map((x, idx) =>
-                        idx === i
-                          ? { ...x, numero: Number(e.target.value) }
-                          : x,
-                      ),
-                    )
-                  }
-                  title="Numéro de la journée (modifiable)"
-                  className="w-16 rounded-lg border border-emerald-300 px-2 py-1.5 text-center text-sm font-semibold"
-                />
+                <span className="text-sm font-semibold text-slate-600">
+                  J{j.numero}
+                </span>
+                <span
+                  className="flex items-center gap-1 text-xs text-amber-700"
+                  title="Nouveau numéro de cette journée (réorganisation)"
+                >
+                  →
+                  <input
+                    type="number"
+                    min={1}
+                    max={journeeRows.length}
+                    value={newOrders[j.id] ?? ""}
+                    placeholder={String(j.numero)}
+                    onChange={(e) =>
+                      setNewOrders((prev) => ({
+                        ...prev,
+                        [j.id]: e.target.value,
+                      }))
+                    }
+                    className="w-12 rounded border border-amber-300 px-1 py-1 text-center text-sm font-bold"
+                  />
+                </span>
                 <input
                   value={j.lieu}
                   placeholder="Lieu (ex: Loudun)"
@@ -458,13 +476,36 @@ export default function ConfigTab({
               </div>
             ))}
           </div>
-          <button
-            onClick={saveJournees}
-            disabled={savingJournees}
-            className="mt-4 rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-60"
-          >
-            {savingJournees ? "Enregistrement…" : "Enregistrer dates et lieux"}
-          </button>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              onClick={saveJournees}
+              disabled={savingJournees}
+              className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-900 disabled:opacity-60"
+            >
+              {savingJournees ? "Enregistrement…" : "Enregistrer dates et lieux"}
+            </button>
+            <button
+              onClick={reordonnerJournees}
+              disabled={reordering}
+              className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-60"
+            >
+              {reordering
+                ? "Réorganisation…"
+                : "🔀 Réorganiser les journées (nouveaux n°)"}
+            </button>
+          </div>
+          {reorderMsg && (
+            <p className="mt-2 text-sm font-medium text-slate-700">
+              {reorderMsg}
+            </p>
+          )}
+          <p className="mt-2 text-xs text-slate-500">
+            🔀 Pour échanger des journées : tapez le nouveau numéro dans la case
+            orange « → » (ex. J1 → 7 et J7 → 1), puis « Réorganiser ». Les
+            rencontres, scores, dates/lieux et scans suivent leur journée.
+            Chaque numéro doit être utilisé une seule fois ; les cases vides
+            gardent leur numéro actuel.
+          </p>
         </section>
       )}
     </div>

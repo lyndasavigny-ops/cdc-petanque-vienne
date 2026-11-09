@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { TYPES_CDC, DIVISIONS, poulesForDivision } from "@/lib/cdc";
+import { adminFetch } from "@/lib/adminFetch";
 
 export default function NewChampionshipForm() {
   const router = useRouter();
@@ -19,18 +20,14 @@ export default function NewChampionshipForm() {
     e.preventDefault();
     setLoading(true);
     try {
-      const res = await fetch("/api/championnats", {
+      const res = await adminFetch("/api/championnats", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ annee, saison, typeCdc, division, poule }),
       });
       const data = await res.json();
       if (res.ok) {
-        // On ouvre directement avec le code administrateur créé.
-        const q = data.adminCode
-          ? `?code=${encodeURIComponent(data.adminCode)}`
-          : "";
-        router.push(`/championnat/${data.id}${q}`);
+        router.push(`/championnat/${data.id}`);
       }
     } finally {
       setLoading(false);

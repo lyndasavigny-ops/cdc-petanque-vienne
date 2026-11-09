@@ -1,39 +1,60 @@
-import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzle, NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
+
+// Connexion paresseuse : le pool n'est créé qu'au premier usage réel.
+// Ainsi le build (Vercel, etc.) réussit même si DATABASE_URL n'est pas
+// encore configurée — l'erreur claire n'apparaît qu'à l'exécution.
 
 const globalForDb = globalThis as typeof globalThis & {
   __arenaNextJsPostgresqlPool?: Pool;
-  __arenaNextJsDb?: ReturnType<typeof drizzle>;
+  __arenaNextJsDrizzle?: NodePgDatabase;
 };
 
-// La connexion est créée à la demande : rien ne plante au moment du build
-// si DATABASE_URL n'est pas encore définie. L'erreur n'arrive qu'à la
-// première vraie requête (à l'exécution).
-function getDb(): ReturnType<typeof drizzle> {
-  if (!globalForDb.__arenaNextJsDb) {
-    const databaseUrl = process.env.DATABASE_URL;
-    if (!databaseUrl) {
-      throw new Error(
-        "DATABASE_URL est nécessaire : ajoutez la variable d'environnement DATABASE_URL (base PostgreSQL) dans Vercel → Settings → Environment Variables.",
-      );
-    }
-    const pool =
-      globalForDb.__arenaNextJsPostgresqlPool ??
-      new Pool({ connectionString: databaseUrl });
-    globalForDb.__arenaNextJsPostgresqlPool = pool;
-    globalForDb.__arenaNextJsDb = drizzle(pool);
+function getPool(): Pool {
+  if (globalForDb.__arenaNextJsPostgresqlPool) {
+    return globalForDb.__arenaNextJsPostgresqlPool;
   }
-  return globalForDb.__arenaNextJsDb;
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    throw new Error(
+      "DATABASE_URL est manquante. Sur Vercel : Settings → Environment Variables → ajouter DATABASE_URL (adresse de votre base Neon/Postgres), puis redéployer.",
+    );
+  }
+  // Les bases hébergées (Neon, Supabase, Railway…) exigent le SSL.
+  // On l'active automatiquement sauf pour une base locale.
+  const isLocal =
+    /localhost|127\.0\.0\.1/.test(databaseUrl) &&
+    !/sslmode=require/.test(databaseUrl);
+  const pool = new Pool({
+    connectionString: databaseUrl,
+    ssl: isLocal ? undefined : { rejectUnauthorized: false },
+  });
+  globalForDb.__arenaNextJsPostgresqlPool = pool;
+  return pool;
 }
 
-// `db` s'initialise paresseusement (proxy) : utiliser db.select()/insert()/...
-// déclenche la connexion seulement au premier usage réel.
-export const db = new Proxy({} as ReturnType<typeof drizzle>, {
-  get(_target, prop) {
-    const instance = getDb() as unknown as Record<string | symbol, unknown>;
-    const value = instance[prop];
-    return typeof value === "function"
-      ? (value as (...args: unknown[]) => unknown).bind(instance)
-      : value;
+function getDb(): NodePgDatabase {
+  if (globalForDb.__arenaNextJsDrizzle) {
+    return globalForDb.__arenaNextJsDrizzle;
+  }
+  const instance = drizzle(getPool());
+  globalForDb.__arenaNextJsDrizzle = instance;
+  return instance;
+}
+
+// Proxy : toute propriété utilisée sur `db` déclenche l'initialisation réelle.
+export const db = new Proxy({} as NodePgDatabase, {
+  get(_target, prop, receiver) {
+    const real = getDb();
+    const value = Reflect.get(real, prop, receiver);
+    return typeof value === "function" ? value.bind(real) : value;
+  },
+});
+
+export const pool = new Proxy({} as Pool, {
+  get(_target, prop, receiver) {
+    const real = getPool();
+    const value = Reflect.get(real, prop, receiver);
+    return typeof value === "function" ? value.bind(real) : value;
   },
 });

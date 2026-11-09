@@ -3,15 +3,17 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/prepare-assets.js && next build",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@types/pdfkit": "^0.17.7",
     "dotenv": "17.3.1",
     "drizzle-orm": "0.45.2",
     "next": "16.2.6",
+    "pdfkit": "^0.20.2",
     "pg": "8.20.0",
     "react": "19.2.6",
     "react-dom": "19.2.6"

@@ -2,6 +2,7 @@ import { db } from "@/db";
 import { journees } from "@/db/schema";
 import { eq, asc } from "drizzle-orm";
 import { NextResponse } from "next/server";
+import { isAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -10,12 +11,14 @@ export async function PUT(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  if (!(await isAdmin())) {
+    return NextResponse.json({ error: "Accès refusé." }, { status: 401 });
+  }
   const { id } = await params;
   const cid = Number(id);
   const body = await req.json().catch(() => ({}));
   const list: {
     id: number;
-    numero?: number;
     lieu?: string;
     dateRencontre?: string;
     heure?: string;
@@ -25,7 +28,6 @@ export async function PUT(
     await db
       .update(journees)
       .set({
-        numero: Number(j.numero) || 0,
         lieu: String(j.lieu ?? ""),
         dateRencontre: String(j.dateRencontre ?? ""),
         heure: String(j.heure ?? ""),

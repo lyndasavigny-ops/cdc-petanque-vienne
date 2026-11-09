@@ -1,7 +1,34 @@
 export const TOTAL_POINTS = 36;
 
-export const TYPES_CDC = ["Senior", "Vétéran", "Féminin", "Provençal"] as const;
+// Score imposé en cas de forfait (règlement CDC) :
+// l'équipe vainqueur d'un forfait gagne 19 à 0
+// (3 points avec un point average de +19).
+export const FORFAIT_SCORE = 19;
+
+// Numéro de version affiché sur le site pour vérifier qu'on regarde
+// bien la dernière mise à jour.
+export const APP_VERSION =
+  "v21 — CDC Jeu Provençal (2D+2T), identifiants masqués, Article 12";
+
+export const TYPES_CDC = [
+  "Senior",
+  "Vétéran",
+  "Féminin",
+  "Provençal",
+] as const;
 export type TypeCdc = (typeof TYPES_CDC)[number];
+
+// CDC Jeu Provençal : rencontre en 4 parties (2 doublettes + 2 triplettes,
+// pas de tête-à-tête), chaque partie vaut 9 points → total 36 inchangé.
+export function isProvencal(typeCdc: string): boolean {
+  return typeCdc.toLowerCase().includes("proven");
+}
+
+// Nombre de parties d'une rencontre (critère 4 de l'Article 12) :
+// Pétanque : 11 (6 TT + 3 D + 2 T) · Provençal : 4 (2 D + 2 T)
+export function partiesMax(typeCdc: string): number {
+  return isProvencal(typeCdc) ? 4 : 11;
+}
 
 export const POULES = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
 
@@ -12,39 +39,6 @@ export const DIVISIONS = [
   { division: 3, label: "Division 3", poules: 4 },
   { division: 4, label: "Division 4", poules: 8 },
 ] as const;
-
-export type Format = "Doublettes" | "Triplettes";
-export const FORMATS: Format[] = ["Doublettes", "Triplettes"];
-
-export type FormatConfig = {
-  parties: number;
-  joueursParPartie: number;
-  pointsParPartie: number;
-};
-
-// Une rencontre totalise 36 points :
-//  - Doublettes : 3 parties de 2 joueurs, 12 points chacune  -> 3 x 12 = 36
-//  - Triplettes : 2 parties de 3 joueurs, 18 points chacune  -> 2 x 18 = 36
-export const FORMAT_CONFIG: Record<Format, FormatConfig> = {
-  Doublettes: { parties: 3, joueursParPartie: 2, pointsParPartie: 12 },
-  Triplettes: { parties: 2, joueursParPartie: 3, pointsParPartie: 18 },
-};
-
-// Libellés officiels accentués pour le titre des feuilles de match.
-export const TYPE_LABEL: Record<string, string> = {
-  Senior: "SÉNIOR",
-  Vétéran: "VÉTÉRAN",
-  Féminin: "FÉMININ",
-  Provençal: "PROVENÇAL",
-};
-
-export function typeLabel(typeCdc: string): string {
-  return TYPE_LABEL[typeCdc] ?? typeCdc.toUpperCase();
-}
-
-export function formatConfig(format: string | null | undefined): FormatConfig {
-  return FORMAT_CONFIG[(format as Format) ?? "Doublettes"] ?? FORMAT_CONFIG.Doublettes;
-}
 
 export function poulesForDivision(division: number): string[] {
   const d = DIVISIONS.find((x) => x.division === division);

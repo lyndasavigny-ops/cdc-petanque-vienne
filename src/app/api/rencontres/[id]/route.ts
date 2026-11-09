@@ -1,9 +1,9 @@
 import { db } from "@/db";
-import { rencontres, championships } from "@/db/schema";
+import { rencontres, championships, journees } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
-import { TOTAL_POINTS } from "@/lib/cdc";
-import { formatConfig } from "@/lib/cdc";
+import { TOTAL_POINTS, FORFAIT_SCORE, partiesMax } from "@/lib/cdc";
+import { isAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -15,19 +15,65 @@ export async function PATCH(
   const rid = Number(id);
   const body = await req.json().catch(() => ({}));
 
-  const [current] = await db
-    .select()
-    .from(rencontres)
-    .where(eq(rencontres.id, rid));
-  if (!current) {
-    return NextResponse.json({ error: "Rencontre introuvable" }, { status: 404 });
+  // Autorisation : organisateur (cookie/jeton) OU club référent avec le
+  // code de saisie de la poule ET l'appareil autorisé.
+  const admin = await isAdmin();
+  if (!admin) {
+    const code = String(body.code ?? "")
+      .trim()
+      .toUpperCase();
+    const device = String(body.device ?? "").trim();
+    if (!code) {
+      return NextResponse.json(
+        { error: "Accès refusé : code de saisie requis." },
+        { status: 401 },
+      );
+    }
+    const [renc] = await db
+      .select()
+      .from(rencontres)
+      .where(eq(rencontres.id, rid));
+    if (!renc) {
+      return NextResponse.json({ error: "Rencontre introuvable." }, { status: 404 });
+    }
+    const [champ] = await db
+      .select()
+      .from(championships)
+      .where(eq(championships.id, renc.championshipId));
+    if (!champ || champ.codeSaisie.toUpperCase() !== code) {
+      return NextResponse.json(
+        { error: "Code de saisie invalide pour cette poule." },
+        { status: 401 },
+      );
+    }
+    // Vérification de l'appareil autorisé
+    if (champ.deviceLock && champ.deviceLock !== device) {
+      return NextResponse.json(
+        {
+          error:
+            "Saisie refusée : ce code est réservé à l'appareil du club référent.",
+        },
+        { status: 403 },
+      );
+    }
+    // Journée validée = verrouillée pour les clubs
+    const [j] = await db
+      .select()
+      .from(journees)
+      .where(eq(journees.id, renc.journeeId));
+    if (j?.validee) {
+      return NextResponse.json(
+        {
+          error:
+            "Journée validée : les scores sont verrouillés. Contactez l'organisateur pour toute correction.",
+        },
+        { status: 403 },
+      );
+    }
   }
 
-  const [champ] = await db
-    .select()
-    .from(championships)
-    .where(eq(championships.id, current.championshipId));
-  const cfg = formatConfig(champ?.format);
+  const forfaitA = Boolean(body.forfaitA);
+  const forfaitB = Boolean(body.forfaitB);
 
   // Réinitialisation (effacer la saisie)
   if (body.reset) {
@@ -36,118 +82,36 @@ export async function PATCH(
       .set({
         scoreA: null,
         scoreB: null,
-        partiesA: [],
-        partiesB: [],
         forfaitA: false,
         forfaitB: false,
         saisi: false,
+        partiesA: null,
+        partiesB: null,
       })
       .where(eq(rencontres.id, rid))
       .returning();
     return NextResponse.json(updated);
   }
 
-  // Verrouillage / déverrouillage (sécurité : le club ne peut plus modifier).
-  if (typeof body.verrouille === "boolean") {
-    const [updated] = await db
-      .update(rencontres)
-      .set({ verrouille: body.verrouille })
-      .where(eq(rencontres.id, rid))
-      .returning();
-    return NextResponse.json(updated);
-  }
+  let scoreA = body.scoreA === null || body.scoreA === "" ? null : Number(body.scoreA);
+  let scoreB = body.scoreB === null || body.scoreB === "" ? null : Number(body.scoreB);
 
-  // Une rencontre verrouillée ne peut plus être modifiée.
-  if (current.verrouille && !body.reset) {
-    return NextResponse.json(
-      { error: "Rencontre verrouillée : seul l'administrateur peut la modifier." },
-      { status: 403 },
-    );
-  }
-
-  const forfaitA = Boolean(body.forfaitA);
-  const forfaitB = Boolean(body.forfaitB);
-
-  let scoreA: number | null = null;
-  let scoreB: number | null = null;
-  let partiesA: number[] = [];
-  let partiesB: number[] = [];
-
-  const hasParties =
-    Array.isArray(body.partiesA) && Array.isArray(body.partiesB);
-
-  if (hasParties) {
-    // Saisie détaillée par partie (feuille de match)
-    partiesA = body.partiesA.map((n: unknown) => Number(n) || 0);
-    partiesB = body.partiesB.map((n: unknown) => Number(n) || 0);
-
-    if (partiesA.length !== cfg.parties || partiesB.length !== cfg.parties) {
-      return NextResponse.json(
-        { error: `Il doit y avoir ${cfg.parties} parties.` },
-        { status: 400 },
-      );
-    }
-    for (let i = 0; i < cfg.parties; i++) {
-      const a = partiesA[i];
-      const b = partiesB[i];
-      if (
-        !Number.isInteger(a) ||
-        !Number.isInteger(b) ||
-        a < 0 ||
-        b < 0 ||
-        a > cfg.pointsParPartie ||
-        b > cfg.pointsParPartie
-      ) {
-        return NextResponse.json(
-          {
-            error: `Partie ${i + 1} : chaque score doit être entre 0 et ${
-              cfg.pointsParPartie
-            }.`,
-          },
-          { status: 400 },
-        );
-      }
-      if (a + b !== cfg.pointsParPartie) {
-        return NextResponse.json(
-          {
-            error: `Partie ${i + 1} : le total doit faire ${
-              cfg.pointsParPartie
-            } (actuellement ${a + b}).`,
-          },
-          { status: 400 },
-        );
-      }
-    }
-    scoreA = partiesA.reduce((x, y) => x + y, 0);
-    scoreB = partiesB.reduce((x, y) => x + y, 0);
-  } else {
-    // Saisie du total directement (onglet Saisie)
-    scoreA =
-      body.scoreA === null || body.scoreA === "" ? null : Number(body.scoreA);
-    scoreB =
-      body.scoreB === null || body.scoreB === "" ? null : Number(body.scoreB);
-  }
-
-  // Gestion des forfaits : les scores sont imposés.
+  // En cas de forfait, les scores sont imposés : 19 à 0 pour le vainqueur
+  // (3 points avec un point average de +19 — règlement CDC).
   if (forfaitA && !forfaitB) {
     scoreA = 0;
-    scoreB = TOTAL_POINTS;
-    partiesA = [];
-    partiesB = [];
+    scoreB = FORFAIT_SCORE;
   } else if (forfaitB && !forfaitA) {
-    scoreA = TOTAL_POINTS;
+    scoreA = FORFAIT_SCORE;
     scoreB = 0;
-    partiesA = [];
-    partiesB = [];
   } else if (forfaitA && forfaitB) {
     scoreA = 0;
     scoreB = 0;
-    partiesA = [];
-    partiesB = [];
   } else {
+    // Validation : les deux scores doivent faire 36 au total.
     if (scoreA === null || scoreB === null) {
       return NextResponse.json(
-        { error: "Veuillez saisir les scores." },
+        { error: "Veuillez saisir les deux scores." },
         { status: 400 },
       );
     }
@@ -160,9 +124,7 @@ export async function PATCH(
       scoreB > TOTAL_POINTS
     ) {
       return NextResponse.json(
-        {
-          error: `Chaque score doit être un entier entre 0 et ${TOTAL_POINTS}.`,
-        },
+        { error: `Chaque score doit être un entier entre 0 et ${TOTAL_POINTS}.` },
         { status: 400 },
       );
     }
@@ -178,16 +140,50 @@ export async function PATCH(
     }
   }
 
+  // Parties gagnées (optionnel, critère 4 Article 12) :
+  // Pétanque : total ≤ 11 (6 TT + 3 D + 2 T) · Provençal : total ≤ 4 (2 D + 2 T)
+  const [rencForType] = await db
+    .select()
+    .from(rencontres)
+    .where(eq(rencontres.id, rid));
+  let maxParties = 11;
+  let formatLabel = "11 (6 TT + 3 D + 2 T)";
+  if (rencForType) {
+    const [champType] = await db
+      .select()
+      .from(championships)
+      .where(eq(championships.id, rencForType.championshipId));
+    if (champType) {
+      maxParties = partiesMax(champType.typeCdc);
+      formatLabel =
+        maxParties === 4 ? "4 (2 D + 2 T — Jeu Provençal)" : "11 (6 TT + 3 D + 2 T)";
+    }
+  }
+  let partiesA: number | null = null;
+  let partiesB: number | null = null;
+  if (body.partiesA !== undefined && body.partiesA !== null && body.partiesA !== "") {
+    partiesA = Math.max(0, Math.min(maxParties, Number(body.partiesA) || 0));
+  }
+  if (body.partiesB !== undefined && body.partiesB !== null && body.partiesB !== "") {
+    partiesB = Math.max(0, Math.min(maxParties, Number(body.partiesB) || 0));
+  }
+  if (partiesA !== null && partiesB !== null && partiesA + partiesB > maxParties) {
+    return NextResponse.json(
+      { error: `Parties gagnées : le total ne peut pas dépasser ${formatLabel}.` },
+      { status: 400 },
+    );
+  }
+
   const [updated] = await db
     .update(rencontres)
     .set({
       scoreA,
       scoreB,
-      partiesA,
-      partiesB,
       forfaitA,
       forfaitB,
       saisi: true,
+      partiesA,
+      partiesB,
     })
     .where(eq(rencontres.id, rid))
     .returning();

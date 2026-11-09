@@ -1,3 +1,4 @@
+import { FORFAIT_SCORE } from "./cdc";
 import type { Team, Rencontre } from "@/db/schema";
 
 export type LigneClassement = {
@@ -13,10 +14,9 @@ export type LigneClassement = {
   pointsContre: number;
   difference: number;
   pointsTotal: number;
-  classementFinal: number | null;
+  manuel: number; // rang imposé par l'organisateur (0 = automatique)
 };
 
-// Barème des points — modifiable par l'administrateur.
 export type Bareme = {
   victoire: number;
   nul: number;
@@ -31,97 +31,39 @@ export const BAREME_DEFAUT: Bareme = {
   forfait: 0,
 };
 
-// Confrontation directe : qui a gagné le match entre 2 équipes ?
-function confrontation(
-  rencontres: Rencontre[],
-  idA: number,
-  idB: number,
-): "a" | "b" | "nul" | "aucun" {
-  const m = rencontres.find(
-    (r) =>
-      r.saisi &&
-      ((r.teamAId === idA && r.teamBId === idB) ||
-        (r.teamAId === idB && r.teamBId === idA)),
-  );
-  if (!m) return "aucun";
-  const aIsTeamA = m.teamAId === idA;
-  const sa = m.scoreA ?? 0;
-  const sb = m.scoreB ?? 0;
-  let res: "a" | "b" | "nul";
-  if (sa > sb) res = aIsTeamA ? "a" : "b";
-  else if (sa < sb) res = aIsTeamA ? "b" : "a";
-  else res = "nul";
-  return res;
+export function baremeOf(c: {
+  ptsVictoire?: number | null;
+  ptsNul?: number | null;
+  ptsDefaite?: number | null;
+  ptsForfait?: number | null;
+}): Bareme {
+  return {
+    victoire: c.ptsVictoire ?? 3,
+    nul: c.ptsNul ?? 2,
+    defaite: c.ptsDefaite ?? 1,
+    forfait: c.ptsForfait ?? 0,
+  };
 }
 
-// Mini-championnat : points obtenus dans les seuls matchs entre les équipes
-// à égalité (critère 2 de l'article 12).
-function miniChampionnat(
-  ids: Set<number>,
-  rencontres: Rencontre[],
-  bareme: Bareme,
-): Map<number, number> {
-  const pts = new Map<number, number>();
-  for (const id of ids) pts.set(id, 0);
-  for (const r of rencontres) {
-    if (!r.saisi) continue;
-    if (r.teamAId == null || r.teamBId == null) continue;
-    if (!ids.has(r.teamAId) || !ids.has(r.teamBId)) continue;
-    const sa = r.scoreA ?? 0;
-    const sb = r.scoreB ?? 0;
-    const add = (id: number, v: number) => pts.set(id, (pts.get(id) ?? 0) + v);
-    if (r.forfaitA && !r.forfaitB) {
-      add(r.teamAId, bareme.forfait);
-      add(r.teamBId, bareme.victoire);
-    } else if (r.forfaitB && !r.forfaitA) {
-      add(r.teamBId, bareme.forfait);
-      add(r.teamAId, bareme.victoire);
-    } else if (r.forfaitA && r.forfaitB) {
-      add(r.teamAId, bareme.forfait);
-      add(r.teamBId, bareme.forfait);
-    } else if (sa > sb) {
-      add(r.teamAId, bareme.victoire);
-      add(r.teamBId, bareme.defaite);
-    } else if (sa < sb) {
-      add(r.teamBId, bareme.victoire);
-      add(r.teamAId, bareme.defaite);
-    } else {
-      add(r.teamAId, bareme.nul);
-      add(r.teamBId, bareme.nul);
-    }
-  }
-  return pts;
-}
+type MatchInfo = {
+  aId: number;
+  bId: number;
+  sa: number;
+  sb: number;
+  pa: number | null; // parties gagnées équipe A (sur 11)
+  pb: number | null;
+};
 
-// Applique le classement final saisi par l'admin (places 1..N).
-function appliquerManuel(lignes: LigneClassement[]): LigneClassement[] {
-  const n = lignes.length;
-  const slots: (LigneClassement | null)[] = new Array(n).fill(null);
-  const manuels: LigneClassement[] = [];
-  const auto: LigneClassement[] = [];
-  for (const l of lignes) {
-    if (
-      l.classementFinal != null &&
-      l.classementFinal >= 1 &&
-      l.classementFinal <= n
-    ) {
-      manuels.push(l);
-    } else {
-      auto.push(l);
-    }
-  }
-  for (const l of manuels) {
-    slots[l.classementFinal! - 1] = l;
-  }
-  let ai = 0;
-  for (let r = 0; r < n; r++) {
-    if (!slots[r] && ai < auto.length) {
-      slots[r] = auto[ai++];
-    }
-  }
-  return slots.filter((s): s is LigneClassement => s !== null);
-}
-
+/**
+ * Classement selon l'Article 12 du règlement CDC (FFPJP) :
+ *  1. Total des points marqués
+ *  2. Égalité entre 2 : résultat de l'opposition directe ; si nul → 3 puis 4
+ *     Égalité entre 3+ : mini-classement (critère 1) sur les seules
+ *     oppositions entre équipes concernées, puis 3 et 4 si nécessaire
+ *  3. Point average général (Pour − Contre)
+ *  4. Parties gagnées dans l'opposition entre elles (sur 11 : 6TT+3D+2T)
+ *  L'ordre manuel de l'organisateur prime sur tout.
+ */
 export function computeClassement(
   teams: Team[],
   rencontres: Rencontre[],
@@ -142,9 +84,11 @@ export function computeClassement(
       pointsContre: 0,
       difference: 0,
       pointsTotal: 0,
-      classementFinal: t.classementFinal ?? null,
+      manuel: (t as { classementManuel?: number }).classementManuel ?? 0,
     });
   }
+
+  const matches: MatchInfo[] = [];
 
   for (const r of rencontres) {
     if (!r.saisi) continue;
@@ -155,21 +99,22 @@ export function computeClassement(
 
     let sa = r.scoreA ?? 0;
     let sb = r.scoreB ?? 0;
-
-    // Forfait : l'équipe vainqueur l'emporte 19 à 0 (règlement fédéral).
-    const fA = r.forfaitA && !r.forfaitB;
-    const fB = r.forfaitB && !r.forfaitA;
-    const fBoth = r.forfaitA && r.forfaitB;
-    if (fA) {
+    if (r.forfaitA && !r.forfaitB) {
       sa = 0;
-      sb = 19;
-    } else if (fB) {
-      sa = 19;
+      sb = FORFAIT_SCORE;
+    } else if (r.forfaitB && !r.forfaitA) {
       sb = 0;
-    } else if (fBoth) {
-      sa = 0;
-      sb = 0;
+      sa = FORFAIT_SCORE;
     }
+
+    matches.push({
+      aId: r.teamAId,
+      bId: r.teamBId,
+      sa,
+      sb,
+      pa: (r as { partiesA?: number | null }).partiesA ?? null,
+      pb: (r as { partiesB?: number | null }).partiesB ?? null,
+    });
 
     A.joues++;
     B.joues++;
@@ -178,17 +123,17 @@ export function computeClassement(
     B.pointsPour += sb;
     B.pointsContre += sa;
 
-    if (fA) {
+    if (r.forfaitA && !r.forfaitB) {
       A.forfaits++;
       A.pointsTotal += bareme.forfait;
       B.gagnes++;
       B.pointsTotal += bareme.victoire;
-    } else if (fB) {
+    } else if (r.forfaitB && !r.forfaitA) {
       B.forfaits++;
       B.pointsTotal += bareme.forfait;
       A.gagnes++;
       A.pointsTotal += bareme.victoire;
-    } else if (fBoth) {
+    } else if (r.forfaitA && r.forfaitB) {
       A.forfaits++;
       B.forfaits++;
       A.pointsTotal += bareme.forfait;
@@ -216,37 +161,127 @@ export function computeClassement(
     l.difference = l.pointsPour - l.pointsContre;
   }
 
-  // ARTICLE 12 — critères de classement :
-  // 1. Total des points.
-  // 2. Égalité : mini-championnat (résultats des oppositions entre elles).
-  // 3. Point average général (différence Pour - Contre).
-  const groups = new Map<number, LigneClassement[]>();
-  for (const l of lignes) {
-    const arr = groups.get(l.pointsTotal) ?? [];
-    arr.push(l);
-    groups.set(l.pointsTotal, arr);
-  }
-  const totaux = [...groups.keys()].sort((a, b) => b - a);
-  const tries: LigneClassement[] = [];
-  for (const total of totaux) {
-    const g = groups.get(total)!;
-    if (g.length === 1) {
-      tries.push(g[0]);
-    } else {
-      const ids = new Set(g.map((x) => x.teamId));
-      const mini = miniChampionnat(ids, rencontres, bareme);
-      g.sort((a, b) => {
-        const ma = mini.get(a.teamId) ?? 0;
-        const mb = mini.get(b.teamId) ?? 0;
-        if (mb !== ma) return mb - ma; // critère 2 : mini-championnat
-        if (b.difference !== a.difference) return b.difference - a.difference; // critère 3
-        if (b.pointsPour !== a.pointsPour) return b.pointsPour - a.pointsPour;
-        return a.numero - b.numero;
-      });
-      tries.push(...g);
+  // Oppositions entre un ensemble d'équipes
+  const mutual = (ids: Set<number>) =>
+    matches.filter((m) => ids.has(m.aId) && ids.has(m.bId));
+
+  // Parties gagnées par une équipe dans un ensemble d'oppositions
+  function partiesDans(teamId: number, ms: MatchInfo[]): number {
+    let p = 0;
+    for (const m of ms) {
+      if (m.aId === teamId) p += m.pa ?? 0;
+      else if (m.bId === teamId) p += m.pb ?? 0;
     }
+    return p;
   }
 
-  // Classement final manuel (si l'admin a saisi des places)
-  return appliquerManuel(tries);
+  // Critères 2→4 pour DEUX équipes
+  function pairCompare(a: LigneClassement, b: LigneClassement): number {
+    const ms = mutual(new Set([a.teamId, b.teamId]));
+    let winsA = 0;
+    let winsB = 0;
+    for (const m of ms) {
+      const sA = m.aId === a.teamId ? m.sa : m.sb;
+      const sB = m.aId === a.teamId ? m.sb : m.sa;
+      if (sA > sB) winsA++;
+      else if (sB > sA) winsB++;
+    }
+    if (winsA !== winsB) return winsB - winsA; // critère 2 : opposition directe
+    if (a.difference !== b.difference) return b.difference - a.difference; // critère 3
+    const pgA = partiesDans(a.teamId, ms);
+    const pgB = partiesDans(b.teamId, ms);
+    if (pgA !== pgB) return pgB - pgA; // critère 4
+    if (a.pointsPour !== b.pointsPour) return b.pointsPour - a.pointsPour;
+    return a.numero - b.numero;
+  }
+
+  // Départage d'un groupe à égalité de points
+  function departage(group: LigneClassement[]): LigneClassement[] {
+    if (group.length <= 1) return group;
+    if (group.length === 2) {
+      const [a, b] = group;
+      return pairCompare(a, b) <= 0 ? [a, b] : [b, a];
+    }
+    // 3+ : mini-classement (critère 1) sur les seules oppositions concernées
+    const ids = new Set(group.map((g) => g.teamId));
+    const ms = mutual(ids);
+    const mini = new Map<number, number>(group.map((g) => [g.teamId, 0]));
+    for (const m of ms) {
+      if (m.sa > m.sb) {
+        mini.set(m.aId, (mini.get(m.aId) ?? 0) + bareme.victoire);
+        mini.set(m.bId, (mini.get(m.bId) ?? 0) + bareme.defaite);
+      } else if (m.sa < m.sb) {
+        mini.set(m.bId, (mini.get(m.bId) ?? 0) + bareme.victoire);
+        mini.set(m.aId, (mini.get(m.aId) ?? 0) + bareme.defaite);
+      } else {
+        mini.set(m.aId, (mini.get(m.aId) ?? 0) + bareme.nul);
+        mini.set(m.bId, (mini.get(m.bId) ?? 0) + bareme.nul);
+      }
+    }
+    const sorted = group
+      .slice()
+      .sort(
+        (x, y) => (mini.get(y.teamId) ?? 0) - (mini.get(x.teamId) ?? 0),
+      );
+    const result: LigneClassement[] = [];
+    let i = 0;
+    while (i < sorted.length) {
+      let j = i;
+      while (
+        j < sorted.length &&
+        mini.get(sorted[j].teamId) === mini.get(sorted[i].teamId)
+      )
+        j++;
+      const sub = sorted.slice(i, j);
+      if (sub.length === 1) {
+        result.push(sub[0]);
+      } else if (sub.length === 2) {
+        const [a, b] = sub;
+        result.push(...(pairCompare(a, b) <= 0 ? [a, b] : [b, a]));
+      } else {
+        // toujours à égalité : critère 3 (général) puis 4 (oppositions)
+        sub.sort((a, b) => {
+          if (a.difference !== b.difference)
+            return b.difference - a.difference;
+          const pgA = partiesDans(a.teamId, ms);
+          const pgB = partiesDans(b.teamId, ms);
+          if (pgA !== pgB) return pgB - pgA;
+          if (a.pointsPour !== b.pointsPour)
+            return b.pointsPour - a.pointsPour;
+          return a.numero - b.numero;
+        });
+        result.push(...sub);
+      }
+      i = j;
+    }
+    return result;
+  }
+
+  // Tri principal : critère 1 (points), puis départage des groupes
+  lignes.sort(
+    (a, b) => b.pointsTotal - a.pointsTotal || a.numero - b.numero,
+  );
+  const final: LigneClassement[] = [];
+  let i = 0;
+  while (i < lignes.length) {
+    let j = i;
+    while (
+      j < lignes.length &&
+      lignes[j].pointsTotal === lignes[i].pointsTotal
+    )
+      j++;
+    final.push(...departage(lignes.slice(i, j)));
+    i = j;
+  }
+
+  // Ordre manuel de l'organisateur : prioritaire (tri stable)
+  final.sort((a, b) => {
+    if (a.manuel > 0 || b.manuel > 0) {
+      if (a.manuel > 0 && b.manuel > 0) return a.manuel - b.manuel;
+      return a.manuel > 0 ? -1 : 1;
+    }
+    return 0;
+  });
+
+  return final;
 }

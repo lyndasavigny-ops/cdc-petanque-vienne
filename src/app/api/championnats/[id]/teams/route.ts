@@ -2,13 +2,9 @@ import { db } from "@/db";
 import { teams } from "@/db/schema";
 import { eq, asc, inArray } from "drizzle-orm";
 import { NextResponse } from "next/server";
+import { isAdmin } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
-
-const gen = (p: string) =>
-  p + Math.random().toString(36).slice(2, 7).toUpperCase();
-
-type TeamInput = { numero: number; nom: string };
 
 // Remplace la liste des équipes en conservant les ids par numéro
 // (permet de renommer une équipe sans casser le tirage déjà effectué).
@@ -16,10 +12,15 @@ export async function PUT(
   req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
+  if (!(await isAdmin())) {
+    return NextResponse.json({ error: "Accès refusé." }, { status: 401 });
+  }
   const { id } = await params;
   const cid = Number(id);
   const body = await req.json().catch(() => ({}));
-  const list: TeamInput[] = Array.isArray(body.teams) ? body.teams : [];
+  const list: { numero: number; nom: string }[] = Array.isArray(body.teams)
+    ? body.teams
+    : [];
 
   const cleaned = list
     .map((t) => ({ numero: Number(t.numero), nom: String(t.nom ?? "").trim() }))
@@ -33,6 +34,7 @@ export async function PUT(
 
   const keepNumeros = new Set(cleaned.map((t) => t.numero));
 
+  // suppression des équipes retirées (cascade sur rencontres)
   const toDelete = existing
     .filter((t) => !keepNumeros.has(t.numero))
     .map((t) => t.id);
@@ -43,22 +45,13 @@ export async function PUT(
   for (const t of cleaned) {
     const ex = byNumero.get(t.numero);
     if (ex) {
-      const patch: Record<string, unknown> = {};
-      if (ex.nom !== t.nom) patch.nom = t.nom;
-      // garantit un identifiant/mot de passe pour les équipes déjà créées
-      if (!ex.identifiant) patch.identifiant = gen("ORG-");
-      if (!ex.code) patch.code = gen("CLB-");
-      if (Object.keys(patch).length > 0) {
-        await db.update(teams).set(patch).where(eq(teams.id, ex.id));
+      if (ex.nom !== t.nom) {
+        await db.update(teams).set({ nom: t.nom }).where(eq(teams.id, ex.id));
       }
     } else {
-      await db.insert(teams).values({
-        championshipId: cid,
-        numero: t.numero,
-        nom: t.nom,
-        identifiant: gen("ORG-"),
-        code: gen("CLB-"),
-      });
+      await db
+        .insert(teams)
+        .values({ championshipId: cid, numero: t.numero, nom: t.nom });
     }
   }
 
