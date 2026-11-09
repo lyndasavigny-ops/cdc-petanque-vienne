@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+/* Impression des feuilles de match : A4, recto/verso, sans l'interface */
+@page {
+  size: A4 portrait;
+  margin: 10mm;
+}
+
+@media print {
+  body {
+    background: white;
+  }
+
+  /* On masque toute l'interface (en-tête, codes, menus, boutons)… */
+  body * {
+    visibility: hidden;
+  }
+
+  /* …et on n'affiche que les feuilles de match, calées en haut à gauche */
+  #feuilles-print,
+  #feuilles-print *,
+  #dist-print,
+  #dist-print *,
+  #guide-print,
+  #guide-print *,
+  #resultats-print,
+  #resultats-print * {
+    visibility: visible;
+  }
+
+  #feuilles-print,
+  #dist-print,
+  #guide-print,
+  #resultats-print {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    display: grid !important;
+    gap: 0;
+  }
+
+  /* Chaque rencontre/journée commence sur une nouvelle feuille */
+  #feuilles-print section,
+  #feuilles-print .print-sheet {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin: 0 0 6mm 0;
+    box-shadow: none !important;
+    border-color: #111 !important;
+  }
+}
